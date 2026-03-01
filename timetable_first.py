@@ -53,6 +53,22 @@ def _to_bool(val):
     return s in ("true", "1", "yes", "o")
 
 
+def _normalize_date_col(df: pd.DataFrame, col: str = "Date") -> pd.DataFrame:
+    """Date 컬럼을 YYYY-MM-DD 문자열로 통일해 날짜 변경 시 비교/필터 오류 방지."""
+    if df.empty or col not in df.columns:
+        return df
+    def _norm(v):
+        if pd.isna(v):
+            return ""
+        try:
+            return pd.to_datetime(v).strftime("%Y-%m-%d")
+        except Exception:
+            return str(v).strip().split()[0][:10] if str(v).strip() else ""
+    df = df.copy()
+    df[col] = df[col].apply(_norm)
+    return df
+
+
 def get_slots(day_type: str, use_30min: bool) -> list:
     """날짜 유형과 30분 단위 사용 여부에 따라 시간 슬롯 리스트 반환."""
     base = BUSINESS_HOURS if day_type == "business" else HOLIDAY_HOURS
@@ -126,6 +142,7 @@ selected_date_str = str(selected_date)
 # 1. 목표 데이터 (워크시트: goals) — 기존 시트(4컬럼)와 호환, Goal*_Done은 없으면 추가
 default_goals_minimal = pd.DataFrame({"Date": [], "Goal1": [], "Goal2": [], "Goal3": []})
 goals_df = load_data(WORKSHEET_GOALS, default_goals_minimal)
+goals_df = _normalize_date_col(goals_df)
 goals_df[["Goal1", "Goal2", "Goal3"]] = goals_df[["Goal1", "Goal2", "Goal3"]].fillna("")
 for c in ["Goal1_Done", "Goal2_Done", "Goal3_Done"]:
     if c not in goals_df.columns:
@@ -140,11 +157,20 @@ if selected_date_str not in goals_df["Date"].values:
     goals_df = pd.concat([goals_df, new_row], ignore_index=True)
     save_data(goals_df, WORKSHEET_GOALS)
 
+# 해당 날짜 행이 없으면 빈 행 추가 (날짜 형식 불일치 등으로 비교 실패 시 대비)
+goals_for_date = goals_df[goals_df["Date"] == selected_date_str]
+if goals_for_date.empty:
+    new_row = pd.DataFrame([{
+        "Date": selected_date_str, "Goal1": "", "Goal2": "", "Goal3": "",
+        "Goal1_Done": False, "Goal2_Done": False, "Goal3_Done": False
+    }])
+    goals_df = pd.concat([goals_df, new_row], ignore_index=True)
 current_goals = goals_df[goals_df["Date"] == selected_date_str].iloc[0]
 
 # 2. 요일 유형 (출근일/휴일) 및 30분 단위 설정 — 기존 시트(2컬럼)와 호환, Use30Min 없으면 추가
 default_day_type_minimal = pd.DataFrame({"Date": [], "DayType": []})
 day_type_df = load_data(WORKSHEET_DAY_TYPE, default_day_type_minimal)
+day_type_df = _normalize_date_col(day_type_df)
 if "Use30Min" not in day_type_df.columns:
     day_type_df["Use30Min"] = False
 day_type_df["Use30Min"] = day_type_df["Use30Min"].apply(_to_bool)
@@ -162,6 +188,7 @@ else:
 # 3. 시간표 데이터 (워크시트: timetable) — 슬롯은 해당 날짜의 Use30Min(use_30min_saved) 기준
 default_timetable = pd.DataFrame({"Date": [], "시간": [], "활동 내용": [], "카테고리": []})
 timetable_df = load_data(WORKSHEET_TIMETABLE, default_timetable)
+timetable_df = _normalize_date_col(timetable_df)
 slots = get_slots(day_type, use_30min_saved)
 
 existing = timetable_df[timetable_df["Date"] == selected_date_str]
@@ -177,6 +204,7 @@ current_timetable = pd.DataFrame(rows)
 # 4. 누적 타이머 데이터 (워크시트: cumulative) — 측정 시간대 기록용 '기록내역' 컬럼 포함
 default_cumulative = pd.DataFrame({"Date": [], "활동명": [], "누적분": [], "기록내역": []})
 cumulative_df = load_data(WORKSHEET_CUMULATIVE, default_cumulative)
+cumulative_df = _normalize_date_col(cumulative_df)
 if "기록내역" not in cumulative_df.columns:
     cumulative_df["기록내역"] = ""
 cumulative_df["기록내역"] = cumulative_df["기록내역"].fillna("")
