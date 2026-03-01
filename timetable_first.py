@@ -6,9 +6,14 @@
 import streamlit as st
 import pandas as pd
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from streamlit_gsheets import GSheetsConnection
+
+try:
+    from gspread.exceptions import APIError as GSpreadAPIError
+except ImportError:
+    GSpreadAPIError = Exception  # fallback if gspread not installed
 
 # =============================================================================
 # [구글 시트 연동] st.connection으로 secrets.toml의 connections.gsheets 사용
@@ -28,6 +33,14 @@ WORKSHEET_GOALS = "goals"
 WORKSHEET_TIMETABLE = "timetable"
 WORKSHEET_CUMULATIVE = "cumulative"
 WORKSHEET_DAY_TYPE = "day_type"
+
+
+def _str_or_blank(val):
+    """NaN 또는 'nan' 문자열을 공란으로 통일해 UI 표기 문제 방지."""
+    if pd.isna(val):
+        return ""
+    s = str(val).strip()
+    return "" if s == "nan" else s
 
 
 def get_slots(day_type: str, use_30min: bool) -> list:
@@ -72,8 +85,15 @@ def save_data(df: pd.DataFrame, worksheet_name: str) -> None:
     DataFrame 전체를 해당 워크시트에 덮어쓰기(Update).
     API 내부적으로 시트 clear 후 set_with_dataframe으로 전체 행 기록.
     """
-    conn = _get_gsheets_conn()
-    conn.update(worksheet=worksheet_name, data=df)
+    try:
+        conn = _get_gsheets_conn()
+        conn.update(worksheet=worksheet_name, data=df)
+    except GSpreadAPIError:
+        st.error(
+            "**구글 시트 접근 실패** — 스프레드시트를 Service Account 이메일(Secrets의 `client_email`)과 "
+            "**편집자** 권한으로 공유했는지 확인하세요. Streamlit Cloud: Manage app → Settings → Secrets 에서 `client_email` 값을 복사해, 구글 시트 **공유**에 해당 이메일을 추가하세요."
+        )
+        raise
 
 
 # 페이지 설정
@@ -85,9 +105,10 @@ selected_date = st.date_input("📅 조회 및 기록할 날짜를 선택하세�
 selected_date_str = str(selected_date)
 
 # --- [데이터 초기화 및 로드] — 구글 시트 워크시트에서 Select ---
-# 1. 목표 데이터 (워크시트: goals)
+# 1. 목표 데이터 (워크시트: goals) — NaN을 공란으로 통일
 default_goals = pd.DataFrame({"Date": [], "Goal1": [], "Goal2": [], "Goal3": []})
 goals_df = load_data(WORKSHEET_GOALS, default_goals)
+goals_df[["Goal1", "Goal2", "Goal3"]] = goals_df[["Goal1", "Goal2", "Goal3"]].fillna("")
 
 if selected_date_str not in goals_df["Date"].values:
     new_row = pd.DataFrame([{"Date": selected_date_str, "Goal1": "", "Goal2": "", "Goal3": ""}])
@@ -120,14 +141,17 @@ rows = []
 for t in slots:
     match = existing[existing["시간"] == t]
     if not match.empty:
-        rows.append({"Date": selected_date_str, "시간": t, "활동 내용": match.iloc[0]["활동 내용"], "카테고리": match.iloc[0]["카테고리"]})
+        rows.append({"Date": selected_date_str, "시간": t, "활동 내용": _str_or_blank(match.iloc[0]["활동 내용"]), "카테고리": _str_or_blank(match.iloc[0]["카테고리"])})
     else:
         rows.append({"Date": selected_date_str, "시간": t, "활동 내용": "", "카테고리": ""})
 current_timetable = pd.DataFrame(rows)
 
-# 4. 누적 타이머 데이터 (워크시트: cumulative)
-default_cumulative = pd.DataFrame({"Date": [], "활동명": [], "누적분": []})
+# 4. 누적 타이머 데이터 (워크시트: cumulative) — 측정 시간대 기록용 '기록내역' 컬럼 포함
+default_cumulative = pd.DataFrame({"Date": [], "활동명": [], "누적분": [], "기록내역": []})
 cumulative_df = load_data(WORKSHEET_CUMULATIVE, default_cumulative)
+if "기록내역" not in cumulative_df.columns:
+    cumulative_df["기록내역"] = ""
+cumulative_df["기록내역"] = cumulative_df["기록내역"].fillna("")
 current_cumulative = cumulative_df[cumulative_df["Date"] == selected_date_str]
 
 # --- [세션 상태 (타이머용)] ---
@@ -137,6 +161,8 @@ if 'start_time' not in st.session_state:
     st.session_state.start_time = None
 if 'pending_elapsed_minutes' not in st.session_state:
     st.session_state.pending_elapsed_minutes = None
+if 'pending_time_range_str' not in st.session_state:
+    st.session_state.pending_time_range_str = ""  # 종료 시 활동명 미입력 시, 나중에 기록내역에 쓸 "HH:MM-HH:MM"
 
 # ==========================================
 # UI 구현 (F-01 ~ F-04 동작 유지)
@@ -147,16 +173,18 @@ st.header(f"🎯 {selected_date_str} 목표 TOP 3")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    g1 = st.text_input("목표 1", value=current_goals["Goal1"])
+    g1 = st.text_input("목표 1", value=_str_or_blank(current_goals["Goal1"]), key=f"goal1_{selected_date_str}")
 with col2:
-    g2 = st.text_input("목표 2", value=current_goals["Goal2"])
+    g2 = st.text_input("목표 2", value=_str_or_blank(current_goals["Goal2"]), key=f"goal2_{selected_date_str}")
 with col3:
-    g3 = st.text_input("목표 3", value=current_goals["Goal3"])
+    g3 = st.text_input("목표 3", value=_str_or_blank(current_goals["Goal3"]), key=f"goal3_{selected_date_str}")
 
-# 목표 저장 로직 — 변경 시 구글 시트에 Update
-if g1 != current_goals["Goal1"] or g2 != current_goals["Goal2"] or g3 != current_goals["Goal3"]:
-    goals_df.loc[goals_df["Date"] == selected_date_str, ["Goal1", "Goal2", "Goal3"]] = [g1, g2, g3]
+# 목표 저장 버튼 — 클릭 시 구글 시트에 반영 후 화면 갱신
+if st.button("💾 목표 저장", type="primary", key=f"goals_save_{selected_date_str}"):
+    goals_df.loc[goals_df["Date"] == selected_date_str, ["Goal1", "Goal2", "Goal3"]] = [g1 or "", g2 or "", g3 or ""]
     save_data(goals_df, WORKSHEET_GOALS)
+    st.success("목표가 저장되었습니다.")
+    st.rerun()
 
 st.divider()
 
@@ -175,15 +203,24 @@ with left_col:
             if st.form_submit_button("저장"):
                 if late_name and late_name.strip():
                     pending_mins = st.session_state.pending_elapsed_minutes
+                    time_range_str = st.session_state.get("pending_time_range_str", "")
                     cum_df = load_data(WORKSHEET_CUMULATIVE, default_cumulative)
+                    if "기록내역" not in cum_df.columns:
+                        cum_df["기록내역"] = ""
+                    cum_df["기록내역"] = cum_df["기록내역"].fillna("")
                     curr = cum_df[cum_df["Date"] == selected_date_str]
                     if late_name.strip() in curr["활동명"].values:
-                        cum_df.loc[(cum_df["Date"] == selected_date_str) & (cum_df["활동명"] == late_name.strip()), "누적분"] += pending_mins
+                        mask = (cum_df["Date"] == selected_date_str) & (cum_df["활동명"] == late_name.strip())
+                        cum_df.loc[mask, "누적분"] += pending_mins
+                        if time_range_str:
+                            prev = cum_df.loc[mask, "기록내역"].iloc[0]
+                            cum_df.loc[mask, "기록내역"] = (prev + ", " + time_range_str) if prev else time_range_str
                     else:
-                        new_row = pd.DataFrame([{"Date": selected_date_str, "활동명": late_name.strip(), "누적분": pending_mins}])
+                        new_row = pd.DataFrame([{"Date": selected_date_str, "활동명": late_name.strip(), "누적분": pending_mins, "기록내역": time_range_str}])
                         cum_df = pd.concat([cum_df, new_row], ignore_index=True)
                     save_data(cum_df, WORKSHEET_CUMULATIVE)
                     st.session_state.pending_elapsed_minutes = None
+                    st.session_state.pending_time_range_str = ""
                     st.success(f"[{late_name.strip()}] {pending_mins}분 저장 완료!")
                     st.rerun()
                 else:
@@ -202,20 +239,31 @@ with left_col:
             st.session_state.timer_running = False
             elapsed_seconds = time.time() - st.session_state.start_time
             elapsed_minutes = max(1, int(elapsed_seconds // 60))
+            # 측정 시간대 문자열 (예: "22:55-22:56")
+            start_dt = datetime.fromtimestamp(st.session_state.start_time)
+            end_dt = datetime.now()
+            time_range_str = start_dt.strftime("%H:%M") + "-" + end_dt.strftime("%H:%M")
 
             if activity_name and activity_name.strip():
                 cum_df = load_data(WORKSHEET_CUMULATIVE, default_cumulative)
+                if "기록내역" not in cum_df.columns:
+                    cum_df["기록내역"] = ""
+                cum_df["기록내역"] = cum_df["기록내역"].fillna("")
                 curr = cum_df[cum_df["Date"] == selected_date_str]
                 if activity_name.strip() in curr["활동명"].values:
-                    cum_df.loc[(cum_df["Date"] == selected_date_str) & (cum_df["활동명"] == activity_name.strip()), "누적분"] += elapsed_minutes
+                    mask = (cum_df["Date"] == selected_date_str) & (cum_df["활동명"] == activity_name.strip())
+                    cum_df.loc[mask, "누적분"] += elapsed_minutes
+                    prev = cum_df.loc[mask, "기록내역"].iloc[0]
+                    cum_df.loc[mask, "기록내역"] = (prev + ", " + time_range_str) if prev else time_range_str
                 else:
-                    new_row = pd.DataFrame([{"Date": selected_date_str, "활동명": activity_name.strip(), "누적분": elapsed_minutes}])
+                    new_row = pd.DataFrame([{"Date": selected_date_str, "활동명": activity_name.strip(), "누적분": elapsed_minutes, "기록내역": time_range_str}])
                     cum_df = pd.concat([cum_df, new_row], ignore_index=True)
                 save_data(cum_df, WORKSHEET_CUMULATIVE)
                 st.success(f"[{activity_name.strip()}] {elapsed_minutes}분 저장 완료!")
                 st.rerun()
             else:
                 st.session_state.pending_elapsed_minutes = elapsed_minutes
+                st.session_state.pending_time_range_str = time_range_str
                 st.rerun()
 
     if st.session_state.timer_running:
@@ -226,6 +274,10 @@ with left_col:
     if not display_cumulative.empty:
         for _, row in display_cumulative.iterrows():
             st.metric(label=row["활동명"], value=f"{int(row['누적분'])} 분")
+            # 측정 시간대 상세 (예: "22:55-22:56, 22:57-22:59 (총 3분)")
+            record = _str_or_blank(row.get("기록내역", ""))
+            if record:
+                st.caption(f"{record} (총 {int(row['누적분'])}분)")
     else:
         st.write("해당 날짜에 기록된 타이머 활동이 없습니다.")
 
@@ -257,6 +309,9 @@ with right_col:
 
     st.caption("내용을 수정하면 구글 시트에 자동으로 저장됩니다.")
     display_df = current_timetable[["시간", "활동 내용", "카테고리"]].copy()
+    # None/NaN을 빈 문자열로 치환해 에디터에 'None'이 보이지 않도록 함
+    display_df["활동 내용"] = display_df["활동 내용"].apply(lambda x: _str_or_blank(x))
+    display_df["카테고리"] = display_df["카테고리"].apply(lambda x: _str_or_blank(x))
 
     edited_df = st.data_editor(
         display_df,
