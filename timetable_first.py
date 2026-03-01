@@ -106,6 +106,15 @@ def load_data(worksheet_name: str, default_df: pd.DataFrame) -> pd.DataFrame:
         return default_df.copy()
 
 
+def _save_goals_safe(goals_df: pd.DataFrame) -> None:
+    """goals 시트 저장 시 Goal*_Done 불리언을 문자열로 바꿔 구글 시트 API 오류를 방지."""
+    out = goals_df.copy()
+    for c in ["Goal1_Done", "Goal2_Done", "Goal3_Done"]:
+        if c in out.columns:
+            out[c] = out[c].apply(lambda x: "TRUE" if _to_bool(x) else "FALSE")
+    save_data(out, WORKSHEET_GOALS)
+
+
 def _save_day_type_safe(day_type_df: pd.DataFrame) -> None:
     """day_type 시트 저장 시 Use30Min 불리언을 문자열로 바꿔 구글 시트 API 오류를 방지."""
     out = day_type_df.copy()
@@ -155,7 +164,7 @@ if selected_date_str not in goals_df["Date"].values:
         "Goal1_Done": False, "Goal2_Done": False, "Goal3_Done": False
     }])
     goals_df = pd.concat([goals_df, new_row], ignore_index=True)
-    save_data(goals_df, WORKSHEET_GOALS)
+    _save_goals_safe(goals_df)
 
 # 해당 날짜 행이 없으면 빈 행 추가 (날짜 형식 불일치 등으로 비교 실패 시 대비)
 goals_for_date = goals_df[goals_df["Date"] == selected_date_str]
@@ -242,7 +251,7 @@ with col3:
 if st.button("💾 목표 저장", type="primary", key=f"goals_save_{selected_date_str}"):
     goals_df.loc[goals_df["Date"] == selected_date_str, ["Goal1", "Goal2", "Goal3"]] = [g1 or "", g2 or "", g3 or ""]
     goals_df.loc[goals_df["Date"] == selected_date_str, ["Goal1_Done", "Goal2_Done", "Goal3_Done"]] = [d1, d2, d3]
-    save_data(goals_df, WORKSHEET_GOALS)
+    _save_goals_safe(goals_df)
     st.success("목표가 저장되었습니다.")
     st.rerun()
 
