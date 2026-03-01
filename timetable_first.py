@@ -63,9 +63,10 @@ def _normalize_date_col(df: pd.DataFrame, col: str = "Date") -> pd.DataFrame:
         try:
             return pd.to_datetime(v).strftime("%Y-%m-%d")
         except Exception:
-            return str(v).strip().split()[0][:10] if str(v).strip() else ""
+            s = str(v).strip().split()[0][:10] if str(v).strip() else ""
+            return s.strip()
     df = df.copy()
-    df[col] = df[col].apply(_norm)
+    df[col] = df[col].apply(_norm).str.strip()
     return df
 
 
@@ -158,38 +159,39 @@ for c in ["Goal1_Done", "Goal2_Done", "Goal3_Done"]:
         goals_df[c] = False
     goals_df[c] = goals_df[c].apply(_to_bool)
 
-if selected_date_str not in goals_df["Date"].values:
-    new_row = pd.DataFrame([{
-        "Date": selected_date_str, "Goal1": "", "Goal2": "", "Goal3": "",
-        "Goal1_Done": False, "Goal2_Done": False, "Goal3_Done": False
-    }])
-    goals_df = pd.concat([goals_df, new_row], ignore_index=True)
-    _save_goals_safe(goals_df)
-
-# 해당 날짜 행이 없으면 빈 행 추가 (날짜 형식 불일치 등으로 비교 실패 시 대비)
+# Date를 문자열로 통일해 비교 (날짜 전환 시 비교 실패 방지)
+goals_df["Date"] = goals_df["Date"].astype(str).str.strip()
 goals_for_date = goals_df[goals_df["Date"] == selected_date_str]
+
 if goals_for_date.empty:
     new_row = pd.DataFrame([{
         "Date": selected_date_str, "Goal1": "", "Goal2": "", "Goal3": "",
         "Goal1_Done": False, "Goal2_Done": False, "Goal3_Done": False
     }])
     goals_df = pd.concat([goals_df, new_row], ignore_index=True)
-current_goals = goals_df[goals_df["Date"] == selected_date_str].iloc[0]
+    _save_goals_safe(goals_df)
+    goals_for_date = goals_df[goals_df["Date"] == selected_date_str]
+
+# 동일 날짜가 여러 행이어도 첫 행만 사용
+current_goals = goals_for_date.iloc[0]
 
 # 2. 요일 유형 (출근일/휴일) 및 30분 단위 설정 — 기존 시트(2컬럼)와 호환, Use30Min 없으면 추가
 default_day_type_minimal = pd.DataFrame({"Date": [], "DayType": []})
 day_type_df = load_data(WORKSHEET_DAY_TYPE, default_day_type_minimal)
 day_type_df = _normalize_date_col(day_type_df)
+day_type_df["Date"] = day_type_df["Date"].astype(str).str.strip()
 if "Use30Min" not in day_type_df.columns:
     day_type_df["Use30Min"] = False
 day_type_df["Use30Min"] = day_type_df["Use30Min"].apply(_to_bool)
 
-if day_type_df.empty or selected_date_str not in day_type_df["Date"].values:
+# 날짜 문자열과 정확히 일치하는 행만 사용 (여러 번 전환 시 필터 빈 결과 방지)
+day_type_match = day_type_df[day_type_df["Date"].astype(str).str.strip() == selected_date_str]
+if day_type_df.empty or len(day_type_match) == 0:
     day_type = "holiday"
     use_30min_saved = False
 else:
-    row = day_type_df[day_type_df["Date"] == selected_date_str].iloc[0]
-    day_type = row["DayType"]
+    row = day_type_match.iloc[0]
+    day_type = str(row["DayType"]).strip() if pd.notna(row.get("DayType")) else "holiday"
     if day_type not in ("business", "holiday"):
         day_type = "holiday"
     use_30min_saved = _to_bool(row.get("Use30Min", False))
@@ -198,6 +200,7 @@ else:
 default_timetable = pd.DataFrame({"Date": [], "시간": [], "활동 내용": [], "카테고리": []})
 timetable_df = load_data(WORKSHEET_TIMETABLE, default_timetable)
 timetable_df = _normalize_date_col(timetable_df)
+timetable_df["Date"] = timetable_df["Date"].astype(str).str.strip()
 slots = get_slots(day_type, use_30min_saved)
 
 existing = timetable_df[timetable_df["Date"] == selected_date_str]
@@ -214,6 +217,7 @@ current_timetable = pd.DataFrame(rows)
 default_cumulative = pd.DataFrame({"Date": [], "활동명": [], "누적분": [], "기록내역": []})
 cumulative_df = load_data(WORKSHEET_CUMULATIVE, default_cumulative)
 cumulative_df = _normalize_date_col(cumulative_df)
+cumulative_df["Date"] = cumulative_df["Date"].astype(str).str.strip()
 if "기록내역" not in cumulative_df.columns:
     cumulative_df["기록내역"] = ""
 cumulative_df["기록내역"] = cumulative_df["기록내역"].fillna("")
