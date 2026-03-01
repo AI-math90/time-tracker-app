@@ -1,0 +1,6 @@
+# Time Tracker - Streamlit + Google Sheets
+# GitHub / Streamlit Cloud 배포 시 사용
+
+streamlit>=1.28
+pandas>=2.0
+st-gsheets-connection
