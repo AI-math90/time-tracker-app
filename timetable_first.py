@@ -90,6 +90,14 @@ def load_data(worksheet_name: str, default_df: pd.DataFrame) -> pd.DataFrame:
         return default_df.copy()
 
 
+def _save_day_type_safe(day_type_df: pd.DataFrame) -> None:
+    """day_type 시트 저장 시 Use30Min 불리언을 문자열로 바꿔 구글 시트 API 오류를 방지."""
+    out = day_type_df.copy()
+    if "Use30Min" in out.columns:
+        out["Use30Min"] = out["Use30Min"].apply(lambda x: "TRUE" if _to_bool(x) else "FALSE")
+    save_data(out, WORKSHEET_DAY_TYPE)
+
+
 def save_data(df: pd.DataFrame, worksheet_name: str) -> None:
     """
     DataFrame 전체를 해당 워크시트에 덮어쓰기(Update).
@@ -322,7 +330,7 @@ with right_col:
             day_type_df = pd.concat([day_type_df, pd.DataFrame([{"Date": selected_date_str, "DayType": new_day_type, "Use30Min": use_30min_saved}])], ignore_index=True)
         else:
             day_type_df.loc[day_type_df["Date"] == selected_date_str, "DayType"] = new_day_type
-        save_data(day_type_df, WORKSHEET_DAY_TYPE)
+        _save_day_type_safe(day_type_df)
         st.rerun()
 
     # [F-04] 30분 단위 확장 — 상태는 day_type 시트의 Use30Min으로 저장·로드
@@ -332,7 +340,7 @@ with right_col:
             day_type_df = pd.concat([day_type_df, pd.DataFrame([{"Date": selected_date_str, "DayType": day_type, "Use30Min": use_30min}])], ignore_index=True)
         else:
             day_type_df.loc[day_type_df["Date"] == selected_date_str, "Use30Min"] = use_30min
-        save_data(day_type_df, WORKSHEET_DAY_TYPE)
+        _save_day_type_safe(day_type_df)
         st.rerun()
 
     st.caption("수정 후 아래 [💾 시간표 저장] 버튼을 누르면 구글 시트에 저장됩니다.")
